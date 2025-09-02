@@ -13,7 +13,7 @@ class NotionController extends Controller
     
     public function __construct()
     {
-        $this->notionToken = env('NOTION_API_TOKEN');
+        $this->notionToken = config('services.notion.token');
     }
     
     public function index()
@@ -34,15 +34,39 @@ class NotionController extends Controller
     
     private function fetchPages()
     {
-        $databaseId = env('NOTION_DATABASE_ID');
+        $databaseId = config('services.notion.database_id');
         
         if (!$databaseId) {
             // データベースIDが設定されていない場合はサンプルデータを返す
             return collect([
-                (object)['id' => 'sample1', 'title' => 'サンプルページ1', 'description' => 'これはサンプルページです'],
-                (object)['id' => 'sample2', 'title' => 'サンプルページ2', 'description' => 'これもサンプルページです'],
-                (object)['id' => 'sample3', 'title' => 'サンプルページ3', 'description' => 'さらにサンプルページです'],
-            ]);
+                (object)[
+                    'id' => 'sample1', 
+                    'title' => 'サンプルページ1', 
+                    'description' => 'これはサンプルページです',
+                    'category' => 'チュートリアル',
+                    'tags' => ['基本', 'サンプル'],
+                    'status' => '公開',
+                    'sort_no' => 10,
+                ],
+                (object)[
+                    'id' => 'sample2', 
+                    'title' => 'サンプルページ2', 
+                    'description' => 'これもサンプルページです',
+                    'category' => 'ドキュメント',
+                    'tags' => ['API', 'ガイド'],
+                    'status' => '下書き',
+                    'sort_no' => 20,
+                ],
+                (object)[
+                    'id' => 'sample3', 
+                    'title' => 'サンプルページ3', 
+                    'description' => 'さらにサンプルページです',
+                    'category' => 'チュートリアル',
+                    'tags' => ['応用'],
+                    'status' => '公開',
+                    'sort_no' => 30,
+                ],
+            ])->sortBy('sort_no')->values();
         }
         
         return Cache::remember('notion_pages', 300, function () use ($databaseId) {
@@ -58,13 +82,26 @@ class NotionController extends Controller
                 if ($response->successful()) {
                     $data = $response->json();
                     return collect($data['results'])->map(function ($page) {
-                        $title = $this->extractTitle($page);
+                        $properties = $page['properties'] ?? [];
+                        
                         return (object)[
                             'id' => $page['id'],
-                            'title' => $title,
-                            'description' => $this->extractProperty($page, 'Description'),
+                            'title' => $this->extractTitle($page),
+                            'description' => $this->extractProperty($page, 'Description') 
+                                          ?? $this->extractProperty($page, '説明'),
+                            'category' => $this->extractMultiSelectProperty($properties, 'カテゴリー')
+                                        ?? $this->extractSelectProperty($properties, 'Category'),
+                            'tags' => $this->extractMultiSelectProperty($properties, 'タグ')
+                                    ?? $this->extractMultiSelectProperty($properties, 'Tags'),
+                            'status' => $this->extractSelectProperty($properties, 'ステータス')
+                                      ?? $this->extractSelectProperty($properties, 'Status'),
+                            'sort_no' => $this->extractNumberProperty($properties, 'SortNo')
+                                      ?? $this->extractNumberProperty($properties, '並び順')
+                                      ?? 999999,
+                            'created_time' => $page['created_time'] ?? null,
+                            'last_edited_time' => $page['last_edited_time'] ?? null,
                         ];
-                    });
+                    })->sortBy('sort_no')->values();
                 }
             } catch (\Exception $e) {
                 \Log::error('Notion API error: ' . $e->getMessage());
@@ -78,10 +115,36 @@ class NotionController extends Controller
     {
         if (str_starts_with($pageId, 'sample')) {
             // サンプルページの場合
+            $sampleData = [
+                'sample1' => [
+                    'title' => 'サンプルページ1',
+                    'category' => 'チュートリアル',
+                    'tags' => ['基本', 'サンプル'],
+                    'status' => '公開',
+                ],
+                'sample2' => [
+                    'title' => 'サンプルページ2',
+                    'category' => 'ドキュメント',
+                    'tags' => ['API', 'ガイド'],
+                    'status' => '下書き',
+                ],
+                'sample3' => [
+                    'title' => 'サンプルページ3',
+                    'category' => 'チュートリアル',
+                    'tags' => ['応用'],
+                    'status' => '公開',
+                ],
+            ];
+            
+            $data = $sampleData[$pageId] ?? ['title' => 'サンプルページ', 'category' => null, 'tags' => [], 'status' => null];
+            
             return (object)[
                 'id' => $pageId,
-                'title' => 'サンプルページ',
+                'title' => $data['title'],
                 'content' => 'これはサンプルページのコンテンツです。',
+                'category' => $data['category'],
+                'tags' => $data['tags'],
+                'status' => $data['status'],
             ];
         }
         
@@ -94,10 +157,18 @@ class NotionController extends Controller
                 
                 if ($response->successful()) {
                     $page = $response->json();
+                    $properties = $page['properties'] ?? [];
+                    
                     return (object)[
                         'id' => $page['id'],
                         'title' => $this->extractTitle($page),
                         'content' => '',
+                        'category' => $this->extractMultiSelectProperty($properties, 'カテゴリー')
+                                    ?? $this->extractSelectProperty($properties, 'Category'),
+                        'tags' => $this->extractMultiSelectProperty($properties, 'タグ')
+                                ?? $this->extractMultiSelectProperty($properties, 'Tags'),
+                        'status' => $this->extractSelectProperty($properties, 'ステータス')
+                                  ?? $this->extractSelectProperty($properties, 'Status'),
                     ];
                 }
             } catch (\Exception $e) {
@@ -168,6 +239,11 @@ class NotionController extends Controller
     
     private function extractTitle($page)
     {
+        // 日本語のプロパティ名を優先的にチェック
+        if (isset($page['properties']['ドキュメント名']['title'][0]['plain_text'])) {
+            return $page['properties']['ドキュメント名']['title'][0]['plain_text'];
+        }
+        
         if (isset($page['properties']['Name']['title'][0]['plain_text'])) {
             return $page['properties']['Name']['title'][0]['plain_text'];
         }
@@ -200,5 +276,32 @@ class NotionController extends Controller
         }
         
         return '';
+    }
+    
+    private function extractSelectProperty($properties, $propertyName)
+    {
+        if (isset($properties[$propertyName]['select']['name'])) {
+            return $properties[$propertyName]['select']['name'];
+        }
+        
+        return null;
+    }
+    
+    private function extractMultiSelectProperty($properties, $propertyName)
+    {
+        if (isset($properties[$propertyName]['multi_select'])) {
+            return collect($properties[$propertyName]['multi_select'])->pluck('name')->toArray();
+        }
+        
+        return [];
+    }
+    
+    private function extractNumberProperty($properties, $propertyName)
+    {
+        if (isset($properties[$propertyName]['number'])) {
+            return $properties[$propertyName]['number'];
+        }
+        
+        return null;
     }
 }
